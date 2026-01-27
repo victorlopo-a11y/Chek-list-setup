@@ -1,0 +1,5 @@
+{
+  "name": "Check List Setup Online",
+  "description": "Uma aplicação digital para gerenciamento de checklists de setup de linha de produção, com suporte a assinaturas digitais e exportação para PDF.",
+  "requestFramePermissions": []
+}
