@@ -48,6 +48,11 @@ const App: React.FC = () => {
 
   // Monitor Supabase Auth Session
   useEffect(() => {
+    // Timeout de segurança: se em 5 segundos o Supabase não responder, libera a tela
+    const timeout = setTimeout(() => {
+      if (isInitializing) setIsInitializing(false);
+    }, 5000);
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         setUser({
@@ -58,6 +63,11 @@ const App: React.FC = () => {
         setFormData(prev => ({ ...prev, responsible: session.user.user_metadata.full_name || prev.responsible }));
       }
       setIsInitializing(false);
+      clearTimeout(timeout);
+    }).catch(err => {
+      console.error("Erro na conexão inicial com Supabase:", err);
+      setIsInitializing(false);
+      clearTimeout(timeout);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -72,7 +82,10 @@ const App: React.FC = () => {
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      subscription.unsubscribe();
+      clearTimeout(timeout);
+    };
   }, []);
 
   useEffect(() => {
@@ -112,7 +125,6 @@ const App: React.FC = () => {
   const fetchHistory = async () => {
     setIsLoadingHistory(true);
     try {
-      // Nota: O RLS no Supabase garantirá que apenas dados permitidos sejam retornados
       const { data, error } = await supabase
         .from('checklists')
         .select('*')
@@ -158,7 +170,6 @@ const App: React.FC = () => {
   const deleteFromHistory = async (e: React.MouseEvent, id: string, creatorId: string) => {
     e.stopPropagation();
     
-    // Verificação defensiva no cliente: Apenas o criador pode deletar
     if (user?.id !== creatorId) {
       alert('Segurança: Você só pode excluir checklists criados por você mesmo.');
       return;
@@ -167,7 +178,6 @@ const App: React.FC = () => {
     if (!confirm('Deseja realmente excluir este checklist permanentemente?')) return;
     
     try {
-      // Reforçamos o filtro user_id para garantir que o RLS tenha uma camada extra de proteção
       const { error } = await supabase
         .from('checklists')
         .delete()
@@ -195,7 +205,7 @@ const App: React.FC = () => {
         .from('checklists')
         .insert([
           {
-            user_id: user.id, // O user_id é essencial para o RLS funcionar
+            user_id: user.id,
             form_data: formData,
             checklist_items: checklist,
             signatures: signatures,
@@ -209,7 +219,7 @@ const App: React.FC = () => {
       fetchHistory();
     } catch (err: any) {
       console.error('Erro ao salvar:', err);
-      alert('Erro ao salvar no banco. Verifique sua conexão e permissões RLS.');
+      alert('Erro ao salvar no banco. Verifique sua conexão e chaves do Supabase.');
     } finally {
       setIsSaving(false);
     }
@@ -236,7 +246,7 @@ const App: React.FC = () => {
       
       const pdf = new jsPDF('p', 'mm', [pdfWidth, pdfHeight]);
       pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight, undefined, 'FAST');
-      pdf.save(`Checklist_Setup_${formData.line || 'FI_12_70'}_${formData.date}.pdf`);
+      pdf.save(`Checklist_Setup_${formData.line || 'LINHA'}_${formData.date}.pdf`);
     } catch (error) {
       console.error("Error generating PDF:", error);
       alert("Erro ao gerar PDF.");
@@ -245,7 +255,6 @@ const App: React.FC = () => {
     }
   };
 
-  // Groups and filtered data for the archive
   const uniqueLines = useMemo(() => {
     const lines = historyItems.map(item => item.form_data.line).filter(Boolean);
     return Array.from(new Set(lines)).sort();
@@ -259,7 +268,10 @@ const App: React.FC = () => {
   if (isInitializing) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <Loader2 className="animate-spin text-[#004a99]" size={48} />
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="animate-spin text-[#004a99]" size={48} />
+          <p className="text-xs font-black text-gray-400 uppercase tracking-widest animate-pulse">Iniciando Sistema...</p>
+        </div>
       </div>
     );
   }
@@ -270,7 +282,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto">
-      {/* Header & Main Navigation */}
       <header className="no-print mb-8">
         <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
           <div className="flex items-center gap-4">
@@ -290,7 +301,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="flex flex-col">
                    <span className="text-xs font-black text-gray-800 uppercase leading-none">{user.name}</span>
-                   <span className="text-[10px] text-gray-400 font-bold">Monitor Online</span>
+                   <span className="text-[10px] text-gray-400 font-bold">Acesso Ativo</span>
                 </div>
                 <button onClick={handleLogout} className="ml-2 text-gray-400 hover:text-red-500 transition-colors">
                    <LogOut size={18} />
@@ -299,7 +310,6 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Tab Switching */}
         <div className="flex p-1 bg-gray-200/50 rounded-2xl w-full max-w-md mx-auto shadow-inner border border-gray-200">
            <button 
              onClick={() => setActiveTab('editor')}
@@ -316,7 +326,6 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Editor Tab Content */}
       {activeTab === 'editor' && (
         <main className="animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="flex justify-end gap-3 mb-6 no-print">
@@ -359,7 +368,7 @@ const App: React.FC = () => {
             className="bg-white border-[2px] border-black text-black overflow-hidden shadow-2xl mb-12 mx-auto"
             style={{ width: '100%', maxWidth: '1000px' }}
           >
-            {/* FI 12 70 Header */}
+            {/* Template FI 12 70 */}
             <div className="grid grid-cols-12 border-b-[2px] border-black">
               <div className="col-span-3 p-4 flex items-center justify-center border-r-[2px] border-black">
                 <div className="flex items-baseline gap-0.5">
@@ -386,6 +395,7 @@ const App: React.FC = () => {
               <h2 className="text-2xl font-black uppercase tracking-[0.2em]">Check List Setup</h2>
             </div>
 
+            {/* Form Fields Section */}
             <div className="bg-[#dcdcdc] py-1.5 font-black text-xs uppercase border-b-[2px] border-black tracking-widest text-center">Dados Gerais</div>
             <div className="grid grid-cols-12 border-b-[2px] border-black">
               <div className="col-span-4 p-2.5 border-r-[2px] border-black flex items-center gap-2">
@@ -494,11 +504,9 @@ const App: React.FC = () => {
         </main>
       )}
 
-      {/* Archive Tab Content */}
       {activeTab === 'archive' && (
         <main className="animate-in fade-in slide-in-from-right-4 duration-500">
            <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-              {/* Sidebar: Line Selection */}
               <div className="lg:col-span-1 space-y-4">
                  <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-5 overflow-hidden">
                     <h3 className="text-xs font-black uppercase text-gray-400 mb-4 tracking-widest flex items-center gap-2">
@@ -541,7 +549,6 @@ const App: React.FC = () => {
                  </div>
               </div>
 
-              {/* Main: Filtered Checklists */}
               <div className="lg:col-span-3">
                  <div className="flex justify-between items-center mb-6">
                     <h2 className="text-xl font-black text-gray-800 uppercase tracking-tight flex items-center gap-3">
