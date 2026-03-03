@@ -4,13 +4,14 @@ import {
   Download, FileCheck, Save, Printer, LogOut, User as UserIcon, 
   CloudUpload, Loader2, History, X, Trash2, FilePlus, 
   CheckCircle2, Search, Factory, ChevronRight, ArrowLeft, LayoutList,
-  RotateCcw, AlertCircle
+  RotateCcw, AlertCircle, Link as LinkIcon, Copy, RefreshCcw, MessageCircle
 } from 'lucide-react';
-import { ChecklistItem, FormData, SignatureData, User } from './types';
+import { ChecklistItem, ChecklistRecord, FormData, SignatureData, SignatureRequests, SignatureRole, User } from './types';
 import { INITIAL_CHECKLIST_ITEMS } from './constants';
 import SignatureCanvas from './components/SignatureCanvas';
 import Auth from './components/Auth';
-import { supabase } from './lib/supabase';
+import RemoteSignaturePage from './components/RemoteSignaturePage';
+import { getBaseUrl, supabase } from './lib/supabase';
 
 // For generating PDF in the browser environment
 import { jsPDF } from 'jspdf';
@@ -18,15 +19,59 @@ import html2canvas from 'html2canvas';
 
 type AppTab = 'editor' | 'archive';
 
+const generateSignatureToken = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+};
+
+const emptySignatureRequests = (): SignatureRequests => ({
+  leader: { token: '', signedAt: null, signerName: '' },
+  monitor: { token: '', signedAt: null, signerName: '' },
+});
+
+const normalizeChecklistRecord = (item: ChecklistRecord) => {
+  const leaderSignature = item.signatures?.leaderSignature || item.leader_signature || '';
+  const monitorSignature = item.signatures?.monitorSignature || item.monitor_signature || '';
+
+  return {
+    ...item,
+    signatures: {
+      leaderSignature,
+      monitorSignature,
+    },
+    signature_requests: {
+      ...emptySignatureRequests(),
+      ...(item.signature_requests || {}),
+      leader: {
+        ...emptySignatureRequests().leader,
+        ...(item.signature_requests?.leader || {}),
+        signedAt: item.signature_requests?.leader?.signedAt || item.leader_signed_at || null,
+      },
+      monitor: {
+        ...emptySignatureRequests().monitor,
+        ...(item.signature_requests?.monitor || {}),
+        signedAt: item.signature_requests?.monitor?.signedAt || item.monitor_signed_at || null,
+      },
+    },
+  };
+};
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<AppTab>('editor');
   const [user, setUser] = useState<User | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
-  const [historyItems, setHistoryItems] = useState<any[]>([]);
+  const [historyItems, setHistoryItems] = useState<ChecklistRecord[]>([]);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [selectedLineFilter, setSelectedLineFilter] = useState<string | null>(null);
+  const [currentChecklistId, setCurrentChecklistId] = useState<string | null>(null);
+  const [signatureRequests, setSignatureRequests] = useState<SignatureRequests>(emptySignatureRequests());
+  const [copiedRole, setCopiedRole] = useState<SignatureRole | null>(null);
+  const [isRefreshingSignatures, setIsRefreshingSignatures] = useState(false);
 
   const [formData, setFormData] = useState<FormData>({
     date: new Date().toISOString().split('T')[0],
@@ -45,6 +90,20 @@ const App: React.FC = () => {
   const [signatures, setSignatures] = useState<SignatureData>({});
   const [isExporting, setIsExporting] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
+  const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const remoteRoleParam = urlParams.get('role');
+  const remoteTokenParam = urlParams.get('token');
+  const remoteChecklistParam = urlParams.get('checklist');
+  const remoteLineParam = urlParams.get('line') || '';
+  const remoteProductParam = urlParams.get('product') || '';
+  const remoteResponsibleParam = urlParams.get('responsible') || '';
+  const remoteSignerParam = urlParams.get('signer') || '';
+  const isRemoteSigningView =
+    (remoteRoleParam === 'leader' || remoteRoleParam === 'monitor') &&
+    typeof remoteChecklistParam === 'string' &&
+    remoteChecklistParam.length > 0 &&
+    typeof remoteTokenParam === 'string' &&
+    remoteTokenParam.length > 0;
 
   // Monitor Supabase Auth Session
   useEffect(() => {
@@ -120,7 +179,80 @@ const App: React.FC = () => {
       ...prev,
       [role === 'leader' ? 'leaderSignature' : 'monitorSignature']: dataUrl
     }));
+
+    setSignatureRequests(prev => ({
+      ...prev,
+      [role]: {
+        ...(prev[role] || {}),
+        signedAt: dataUrl ? new Date().toISOString() : null,
+      }
+    }));
   };
+
+  const buildSignatureLink = (role: SignatureRole, token?: string, checklistId?: string) => {
+    if (!token || !checklistId) return '';
+
+    const params = new URLSearchParams({
+      role,
+      token,
+      checklist: checklistId,
+      line: formData.line || '',
+      product: formData.setupProduct || '',
+      responsible: formData.responsible || '',
+      signer: role === 'leader' ? formData.lineLeader || '' : formData.monitor || '',
+    });
+
+    return `${getBaseUrl()}?${params.toString()}`;
+  };
+
+  const refreshChecklistFromDatabase = useCallback(async (checklistId: string, silent = false) => {
+    if (!silent) {
+      setIsRefreshingSignatures(true);
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('checklists')
+        .select('*')
+        .eq('id', checklistId)
+        .maybeSingle();
+
+      if (error) throw error;
+      if (!data) return;
+
+      const normalized = normalizeChecklistRecord(data as ChecklistRecord);
+
+      setCurrentChecklistId(normalized.id);
+      setFormData(normalized.form_data);
+      setChecklist(normalized.checklist_items);
+      setSignatures(normalized.signatures || {});
+      setSignatureRequests(normalized.signature_requests || emptySignatureRequests());
+    } catch (err) {
+      console.error('Erro ao atualizar checklist:', err);
+    } finally {
+      if (!silent) {
+        setIsRefreshingSignatures(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentChecklistId || activeTab !== 'editor') return;
+
+    const hasPendingRemoteSignature = (['leader', 'monitor'] as SignatureRole[]).some((role) => {
+      const request = signatureRequests[role];
+      const signed = role === 'leader' ? signatures.leaderSignature : signatures.monitorSignature;
+      return Boolean(request?.token && !request?.signedAt && !signed);
+    });
+
+    if (!hasPendingRemoteSignature) return;
+
+    const intervalId = window.setInterval(() => {
+      refreshChecklistFromDatabase(currentChecklistId, true);
+    }, 5000);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeTab, currentChecklistId, refreshChecklistFromDatabase, signatureRequests, signatures]);
 
   const fetchHistory = async () => {
     setIsLoadingHistory(true);
@@ -131,7 +263,7 @@ const App: React.FC = () => {
         .order('created_at', { ascending: false });
       
       if (error) throw error;
-      setHistoryItems(data || []);
+      setHistoryItems((data || []).map(item => normalizeChecklistRecord(item as ChecklistRecord)));
     } catch (err) {
       console.error('Erro ao buscar histórico:', err);
     } finally {
@@ -141,6 +273,7 @@ const App: React.FC = () => {
 
   const resetForm = () => {
     if (!confirm('Deseja limpar todos os campos e iniciar um novo checklist?')) return;
+    setCurrentChecklistId(null);
     setFormData({
       date: new Date().toISOString().split('T')[0],
       line: '',
@@ -155,13 +288,18 @@ const App: React.FC = () => {
     });
     setChecklist(INITIAL_CHECKLIST_ITEMS);
     setSignatures({});
+    setSignatureRequests(emptySignatureRequests());
+    setCopiedRole(null);
     setSaveSuccess(false);
   };
 
-  const loadChecklist = (item: any) => {
-    setFormData(item.form_data);
-    setChecklist(item.checklist_items);
-    setSignatures(item.signatures || {});
+  const loadChecklist = (item: ChecklistRecord) => {
+    const normalized = normalizeChecklistRecord(item);
+    setCurrentChecklistId(normalized.id);
+    setFormData(normalized.form_data);
+    setChecklist(normalized.checklist_items);
+    setSignatures(normalized.signatures || {});
+    setSignatureRequests(normalized.signature_requests || emptySignatureRequests());
     setActiveTab('editor');
     setSaveSuccess(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -201,28 +339,184 @@ const App: React.FC = () => {
     setIsSaving(true);
     setSaveSuccess(false);
     try {
-      const { error } = await supabase
-        .from('checklists')
-        .insert([
-          {
-            user_id: user.id,
-            form_data: formData,
-            checklist_items: checklist,
-            signatures: signatures,
-            created_at: new Date().toISOString()
-          }
-        ]);
+      let persistedRecord: ChecklistRecord | null = null;
+
+      if (currentChecklistId) {
+        const { data: existingData, error: existingError } = await supabase
+          .from('checklists')
+          .select('*')
+          .eq('id', currentChecklistId)
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (existingError) throw existingError;
+        if (existingData) {
+          persistedRecord = normalizeChecklistRecord(existingData as ChecklistRecord);
+        }
+      }
+
+      const mergedSignatures: SignatureData = {
+        leaderSignature: signatures.leaderSignature || persistedRecord?.signatures?.leaderSignature || '',
+        monitorSignature: signatures.monitorSignature || persistedRecord?.signatures?.monitorSignature || '',
+      };
+
+      const mergedRequests: SignatureRequests = {
+        ...emptySignatureRequests(),
+        ...(persistedRecord?.signature_requests || {}),
+        ...signatureRequests,
+        leader: {
+          ...emptySignatureRequests().leader,
+          ...(persistedRecord?.signature_requests?.leader || {}),
+          ...(signatureRequests.leader || {}),
+          signedAt: signatureRequests.leader?.signedAt || persistedRecord?.signature_requests?.leader?.signedAt || null,
+        },
+        monitor: {
+          ...emptySignatureRequests().monitor,
+          ...(persistedRecord?.signature_requests?.monitor || {}),
+          ...(signatureRequests.monitor || {}),
+          signedAt: signatureRequests.monitor?.signedAt || persistedRecord?.signature_requests?.monitor?.signedAt || null,
+        },
+      };
+
+      const payload = {
+        user_id: user.id,
+        form_data: formData,
+        checklist_items: checklist,
+        signatures: mergedSignatures,
+        signature_requests: mergedRequests,
+        leader_signature: mergedSignatures.leaderSignature || null,
+        monitor_signature: mergedSignatures.monitorSignature || null,
+        leader_signed_at: mergedRequests.leader?.signedAt || null,
+        monitor_signed_at: mergedRequests.monitor?.signedAt || null,
+        created_at: new Date().toISOString()
+      };
+
+      const operation = currentChecklistId
+        ? supabase
+            .from('checklists')
+            .update({
+              form_data: payload.form_data,
+              checklist_items: payload.checklist_items,
+              signatures: payload.signatures,
+              signature_requests: payload.signature_requests,
+              leader_signature: payload.leader_signature,
+              monitor_signature: payload.monitor_signature,
+              leader_signed_at: payload.leader_signed_at,
+              monitor_signed_at: payload.monitor_signed_at
+            })
+            .eq('id', currentChecklistId)
+            .eq('user_id', user.id)
+            .select('id')
+            .single()
+        : supabase
+            .from('checklists')
+            .insert([payload])
+            .select('id')
+            .single();
+
+      const { data, error } = await operation;
 
       if (error) throw error;
+      if (data?.id) {
+        setCurrentChecklistId(data.id);
+      }
+      setSignatures(payload.signatures);
+      setSignatureRequests(payload.signature_requests);
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
       fetchHistory();
+      return data?.id || currentChecklistId;
     } catch (err: any) {
       console.error('Erro ao salvar:', err);
       alert('Erro ao salvar no banco. Verifique sua conexão e chaves do Supabase.');
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const createRemoteSignatureLink = async (role: SignatureRole) => {
+    const checklistId = currentChecklistId || await saveToSupabase();
+
+    if (!checklistId) {
+      return;
+    }
+
+    const nextToken = generateSignatureToken();
+    const nextRequests: SignatureRequests = {
+      ...signatureRequests,
+      [role]: {
+        token: nextToken,
+        signedAt: null,
+        signerName: role === 'leader' ? formData.lineLeader : formData.monitor,
+      }
+    };
+    const nextSignatures = {
+      ...signatures,
+      [role === 'leader' ? 'leaderSignature' : 'monitorSignature']: '',
+    };
+
+    try {
+      const { error } = await supabase
+        .from('checklists')
+        .update({
+          signature_requests: nextRequests,
+          signatures: nextSignatures,
+          ...(role === 'leader'
+            ? { leader_signature: null, leader_signed_at: null }
+            : { monitor_signature: null, monitor_signed_at: null }),
+        })
+        .eq('id', checklistId)
+        .eq('user_id', user?.id);
+
+      if (error) throw error;
+
+      setCurrentChecklistId(checklistId);
+      setSignatures(nextSignatures);
+      setSignatureRequests(nextRequests);
+
+      const link = buildSignatureLink(role, nextToken, checklistId);
+      await navigator.clipboard.writeText(link);
+      setCopiedRole(role);
+      setTimeout(() => setCopiedRole(null), 2500);
+      fetchHistory();
+    } catch (err) {
+      console.error('Erro ao gerar link de assinatura:', err);
+      alert('Nao foi possivel gerar o link de assinatura.');
+    }
+  };
+
+  const copyRemoteSignatureLink = async (role: SignatureRole) => {
+    const link = buildSignatureLink(role, signatureRequests[role]?.token, currentChecklistId || undefined);
+    if (!link) {
+      alert('Gere o link antes de copiar.');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopiedRole(role);
+      setTimeout(() => setCopiedRole(null), 2500);
+    } catch (err) {
+      console.error('Erro ao copiar link:', err);
+      alert('Nao foi possivel copiar o link.');
+    }
+  };
+
+  const openWhatsAppForSignature = (role: SignatureRole) => {
+    const link = buildSignatureLink(role, signatureRequests[role]?.token, currentChecklistId || undefined);
+    if (!link) {
+      alert('Gere o link antes de enviar pelo WhatsApp.');
+      return;
+    }
+
+    const signerName = role === 'leader' ? formData.lineLeader : formData.monitor;
+    const text = [
+      `Ola${signerName ? ` ${signerName}` : ''},`,
+      `segue o link para assinatura do checklist da linha ${formData.line || '---'}.`,
+      link,
+    ].join(' ');
+
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
   };
 
   const exportPDF = async () => {
@@ -276,50 +570,69 @@ const App: React.FC = () => {
     );
   }
 
+  if (isRemoteSigningView) {
+    return (
+      <RemoteSignaturePage
+        role={remoteRoleParam as SignatureRole}
+        token={remoteTokenParam as string}
+        checklistId={remoteChecklistParam as string}
+        line={remoteLineParam}
+        setupProduct={remoteProductParam}
+        responsible={remoteResponsibleParam}
+        signerName={remoteSignerParam}
+        onBackToApp={() => {
+          window.location.href = getBaseUrl();
+        }}
+      />
+    );
+  }
+
   if (!user) {
     return <Auth onLogin={handleLogin} />;
   }
 
   return (
-    <div className="min-h-screen p-4 md:p-8 max-w-6xl mx-auto">
-      <header className="no-print mb-8">
-        <div className="flex flex-col md:flex-row justify-between items-center gap-6 mb-8">
-          <div className="flex items-center gap-4">
-            <div className="bg-[#004a99] p-3 rounded-2xl text-white shadow-xl rotate-3">
-              <FileCheck size={36} />
+    <div className="min-h-screen max-w-6xl mx-auto px-3 py-4 md:px-8 md:py-8">
+      <header className="no-print mb-6 md:mb-8">
+        <div className="flex flex-col gap-4 md:flex-row md:justify-between md:items-center md:gap-6 mb-6 md:mb-8">
+          <div className="flex items-center gap-3 md:gap-4">
+            <div className="bg-[#004a99] p-3 rounded-2xl text-white shadow-xl rotate-3 shrink-0">
+              <FileCheck size={32} className="md:w-9 md:h-9" />
             </div>
-            <div>
-              <h1 className="text-3xl font-black text-gray-900 tracking-tight leading-none mb-1 uppercase">Setup Digital</h1>
+            <div className="min-w-0">
+              <h1 className="text-2xl md:text-3xl font-black text-gray-900 tracking-tight leading-none mb-1 uppercase">Setup Digital</h1>
               <p className="text-sm text-gray-500 font-bold uppercase tracking-widest">Grupo Multi • Engenharia Industrial</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-             <div className="bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 flex items-center gap-3">
-                <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center text-[#004a99]">
-                   <UserIcon size={16} />
+          <div className="flex items-center gap-3 w-full md:w-auto">
+             <div className="bg-white w-full md:w-auto px-4 py-3 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center text-[#004a99]">
+                     <UserIcon size={16} />
+                  </div>
+                  <div className="flex flex-col min-w-0">
+                     <span className="text-xs font-black text-gray-800 uppercase leading-none truncate">{user.name}</span>
+                     <span className="text-[10px] text-gray-400 font-bold">Acesso Ativo</span>
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                   <span className="text-xs font-black text-gray-800 uppercase leading-none">{user.name}</span>
-                   <span className="text-[10px] text-gray-400 font-bold">Acesso Ativo</span>
-                </div>
-                <button onClick={handleLogout} className="ml-2 text-gray-400 hover:text-red-500 transition-colors">
+                <button onClick={handleLogout} className="ml-2 text-gray-400 hover:text-red-500 transition-colors shrink-0">
                    <LogOut size={18} />
                 </button>
              </div>
           </div>
         </div>
 
-        <div className="flex p-1 bg-gray-200/50 rounded-2xl w-full max-w-md mx-auto shadow-inner border border-gray-200">
+        <div className="flex p-1 bg-gray-200/50 rounded-2xl w-full shadow-inner border border-gray-200 md:max-w-md md:mx-auto">
            <button 
              onClick={() => setActiveTab('editor')}
-             className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${activeTab === 'editor' ? 'bg-white text-[#004a99] shadow-md' : 'text-gray-500 hover:text-gray-700'}`}
+             className={`flex-1 flex items-center justify-center gap-2 px-3 py-3 rounded-xl font-black text-[11px] md:text-xs uppercase tracking-wide md:tracking-wider transition-all ${activeTab === 'editor' ? 'bg-white text-[#004a99] shadow-md' : 'text-gray-500 hover:text-gray-700'}`}
            >
               <FilePlus size={16} /> Novo Setup
            </button>
            <button 
              onClick={() => setActiveTab('archive')}
-             className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${activeTab === 'archive' ? 'bg-white text-[#004a99] shadow-md' : 'text-gray-500 hover:text-gray-700'}`}
+             className={`flex-1 flex items-center justify-center gap-2 px-3 py-3 rounded-xl font-black text-[11px] md:text-xs uppercase tracking-wide md:tracking-wider transition-all ${activeTab === 'archive' ? 'bg-white text-[#004a99] shadow-md' : 'text-gray-500 hover:text-gray-700'}`}
            >
               <Factory size={16} /> Arquivo por Linha
            </button>
@@ -328,10 +641,10 @@ const App: React.FC = () => {
 
       {activeTab === 'editor' && (
         <main className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="flex justify-end gap-3 mb-6 no-print">
+          <div className="grid grid-cols-1 gap-3 mb-4 no-print sm:grid-cols-3 md:flex md:justify-end">
             <button
               onClick={resetForm}
-              className="flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 font-black rounded-xl transition-all text-xs shadow-sm hover:border-blue-400"
+              className="flex min-h-[56px] items-center justify-center gap-2 px-4 py-3 bg-white border border-gray-200 text-gray-700 font-black rounded-xl transition-all text-xs shadow-sm hover:border-blue-400"
             >
               <RotateCcw size={16} className="text-blue-500" /> Reiniciar Campos
             </button>
@@ -341,7 +654,7 @@ const App: React.FC = () => {
               disabled={isSaving}
               className={`flex items-center gap-2 px-5 py-2.5 ${
                 saveSuccess ? 'bg-emerald-100 text-emerald-700 border-emerald-200' : 'bg-emerald-600 text-white hover:bg-emerald-700'
-              } font-black rounded-xl transition-all shadow-lg disabled:bg-gray-400 text-xs uppercase tracking-tighter`}
+              } min-h-[56px] justify-center font-black rounded-xl transition-all shadow-lg disabled:bg-gray-400 text-xs uppercase tracking-tighter`}
             >
               {isSaving ? <Loader2 size={18} className="animate-spin" /> : saveSuccess ? <CheckCircle2 size={18} /> : <CloudUpload size={18} />}
               {saveSuccess ? 'Checklist Salvo!' : 'Salvar na Nuvem'}
@@ -352,7 +665,7 @@ const App: React.FC = () => {
               disabled={isExporting}
               className={`flex items-center gap-2 px-6 py-2.5 ${
                 isExporting ? 'bg-blue-400' : 'bg-[#004a99] hover:bg-[#003366]'
-              } text-white font-black rounded-xl shadow-lg transition-all text-xs uppercase tracking-tighter`}
+              } min-h-[56px] justify-center text-white font-black rounded-xl shadow-lg transition-all text-xs uppercase tracking-tighter`}
             >
               {isExporting ? (
                 <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -363,11 +676,16 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          <div 
-            ref={printRef}
-            className="bg-white border-[2px] border-black text-black overflow-hidden shadow-2xl mb-12 mx-auto"
-            style={{ width: '100%', maxWidth: '1000px' }}
-          >
+          <div className="no-print mb-3 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-[11px] font-bold uppercase tracking-wide text-blue-700 md:hidden">
+            Deslize lateralmente para preencher o checklist completo no celular.
+          </div>
+
+          <div className="overflow-x-auto pb-4 [-webkit-overflow-scrolling:touch]">
+            <div 
+              ref={printRef}
+              className="bg-white border-[2px] border-black text-black overflow-hidden shadow-2xl mb-12 mx-auto min-w-[1000px]"
+              style={{ width: '100%', maxWidth: '1000px' }}
+            >
             {/* Template FI 12 70 */}
             <div className="grid grid-cols-12 border-b-[2px] border-black">
               <div className="col-span-3 p-4 flex items-center justify-center border-r-[2px] border-black">
@@ -486,6 +804,73 @@ const App: React.FC = () => {
               </tbody>
             </table>
 
+            <div className="border-t-[2px] border-black bg-slate-50 no-print">
+              <div className="grid grid-cols-1 gap-4 p-5 md:grid-cols-2">
+                {(['leader', 'monitor'] as SignatureRole[]).map((role) => {
+                  const isLeader = role === 'leader';
+                  const roleName = isLeader ? 'Lider' : 'Monitor';
+                  const signerName = isLeader ? formData.lineLeader : formData.monitor;
+                  const request = signatureRequests[role];
+                  const link = buildSignatureLink(role, request?.token, currentChecklistId || undefined);
+                  const hasSigned = Boolean(request?.signedAt || (isLeader ? signatures.leaderSignature : signatures.monitorSignature));
+
+                  return (
+                    <div key={role} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[10px] font-black uppercase tracking-[0.25em] text-slate-400">Assinatura Remota</p>
+                          <p className="mt-1 text-sm font-black uppercase text-slate-800">{roleName}: {signerName || 'Nao informado'}</p>
+                        </div>
+                        <span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-wider ${hasSigned ? 'bg-emerald-100 text-emerald-700' : request?.token ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                          {hasSigned ? 'Assinado' : request?.token ? 'Pendente' : 'Sem link'}
+                        </span>
+                      </div>
+
+                      <p className="mt-3 break-all rounded-xl bg-slate-50 px-3 py-2 text-[11px] font-medium text-slate-500">
+                        {link || 'Gere um link para enviar ao responsavel assinar pelo proprio celular.'}
+                      </p>
+
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        <button
+                          onClick={() => createRemoteSignatureLink(role)}
+                          className="flex items-center gap-2 rounded-xl bg-[#004a99] px-4 py-2 text-[10px] font-black uppercase tracking-wider text-white shadow-lg"
+                        >
+                          <LinkIcon size={14} />
+                          {request?.token ? 'Gerar novo link' : 'Gerar link'}
+                        </button>
+                        <button
+                          onClick={() => copyRemoteSignatureLink(role)}
+                          disabled={!request?.token}
+                          className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-wider text-slate-600 disabled:opacity-50"
+                        >
+                          <Copy size={14} />
+                          {copiedRole === role ? 'Copiado' : 'Copiar link'}
+                        </button>
+                        <button
+                          onClick={() => openWhatsAppForSignature(role)}
+                          disabled={!request?.token}
+                          className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2 text-[10px] font-black uppercase tracking-wider text-emerald-700 disabled:opacity-50"
+                        >
+                          <MessageCircle size={14} />
+                          Enviar WhatsApp
+                        </button>
+                        {currentChecklistId && (
+                          <button
+                            onClick={() => refreshChecklistFromDatabase(currentChecklistId)}
+                            disabled={isRefreshingSignatures}
+                            className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-[10px] font-black uppercase tracking-wider text-slate-600 disabled:opacity-50"
+                          >
+                            <RefreshCcw size={14} className={isRefreshingSignatures ? 'animate-spin' : ''} />
+                            Atualizar
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             <div className="p-10 bg-white border-t-[2px] border-black">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-16">
                 <SignatureCanvas 
@@ -500,6 +885,7 @@ const App: React.FC = () => {
                 />
               </div>
             </div>
+          </div>
           </div>
         </main>
       )}

@@ -25,6 +25,33 @@ export interface SignatureData {
   monitorSignature?: string;
 }
 
+export type SignatureRole = 'leader' | 'monitor';
+
+export interface SignatureRequestStatus {
+  token?: string;
+  signedAt?: string | null;
+  signerName?: string;
+}
+
+export interface SignatureRequests {
+  leader?: SignatureRequestStatus;
+  monitor?: SignatureRequestStatus;
+}
+
+export interface ChecklistRecord {
+  id: string;
+  user_id: string;
+  form_data: FormData;
+  checklist_items: ChecklistItem[];
+  signatures?: SignatureData;
+  signature_requests?: SignatureRequests;
+  leader_signature?: string | null;
+  monitor_signature?: string | null;
+  leader_signed_at?: string | null;
+  monitor_signed_at?: string | null;
+  created_at: string;
+}
+
 export interface User {
   id: string;
   name: string;
