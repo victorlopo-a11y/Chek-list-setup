@@ -18,6 +18,8 @@ import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 
 type AppTab = 'editor' | 'archive';
+const KEEP_ALIVE_STORAGE_KEY = 'checklist_setup:last_keep_alive_at';
+const KEEP_ALIVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const generateSignatureToken = () => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -105,6 +107,33 @@ const App: React.FC = () => {
     typeof remoteTokenParam === 'string' &&
     remoteTokenParam.length > 0;
 
+  const keepSupabaseAlive = useCallback(async (force = false) => {
+    if (!user || typeof window === 'undefined') return;
+
+    const now = Date.now();
+    const storedLastRun = Number(window.localStorage.getItem(KEEP_ALIVE_STORAGE_KEY) || '0');
+    const hasRecentPing = Number.isFinite(storedLastRun) && now - storedLastRun < KEEP_ALIVE_INTERVAL_MS;
+
+    if (!force && hasRecentPing) return;
+    if (!force && typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+
+    try {
+      const { error } = await supabase
+        .from('checklists')
+        .select('id', { count: 'exact', head: true })
+        .limit(1);
+
+      if (error) {
+        console.warn('Keep-alive Supabase falhou:', error.message);
+        return;
+      }
+
+      window.localStorage.setItem(KEEP_ALIVE_STORAGE_KEY, String(now));
+    } catch (err) {
+      console.warn('Erro inesperado no keep-alive:', err);
+    }
+  }, [user]);
+
   // Monitor Supabase Auth Session
   useEffect(() => {
     // Timeout de segurança: se em 5 segundos o Supabase não responder, libera a tela
@@ -152,6 +181,29 @@ const App: React.FC = () => {
       fetchHistory();
     }
   }, [user, activeTab]);
+
+  useEffect(() => {
+    if (!user || isRemoteSigningView) return;
+
+    keepSupabaseAlive(true);
+
+    const intervalId = window.setInterval(() => {
+      keepSupabaseAlive(false);
+    }, 5 * 60 * 1000);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        keepSupabaseAlive(false);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [isRemoteSigningView, keepSupabaseAlive, user]);
 
   const handleLogin = (loggedUser: User) => {
     setUser(loggedUser);

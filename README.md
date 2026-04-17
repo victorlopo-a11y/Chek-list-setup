@@ -15,6 +15,39 @@ View your app in AI Studio: https://ai.studio/apps/drive/1j_seX_o7KvekEmAgXqz2gp
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Copy `.env.example` to `.env.local`
+3. Set your Supabase values in `.env.local`:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+4. Run the app:
    `npm run dev`
+
+## Deploy in Vercel
+
+1. Import this repository in Vercel
+2. In Project Settings > Environment Variables, create:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+3. Deploy (build command: `npm run build`, output: `dist`)
+
+## Keep Supabase Always Online
+
+This project includes two keep-alive layers:
+
+1. Frontend keep-alive while users are active in the app (`App.tsx`)
+2. Scheduled external ping using GitHub Actions (`.github/workflows/supabase-keepalive.yml`)
+
+### Configure GitHub Secrets (optional)
+
+In your repository settings, add:
+
+- `SUPABASE_URL` (example: `https://your-project.supabase.co`)
+- `SUPABASE_ANON_KEY` (your anon/public key)
+
+If not provided, the workflow uses the project defaults already configured in this repository.
+
+### Run keep-alive manually (local)
+
+```bash
+npm run keepalive:ping
+```
