@@ -4,7 +4,7 @@ import {
   Download, FileCheck, Save, Printer, LogOut, User as UserIcon, 
   CloudUpload, Loader2, History, X, Trash2, FilePlus, 
   CheckCircle2, Search, Factory, ChevronRight, ArrowLeft, LayoutList,
-  RotateCcw, AlertCircle, Link as LinkIcon, Copy, RefreshCcw, MessageCircle
+  RotateCcw, AlertCircle, Link as LinkIcon, Copy, RefreshCcw, MessageCircle, Image, Send
 } from 'lucide-react';
 import { ChecklistItem, ChecklistRecord, FormData, SignatureData, SignatureRequests, SignatureRole, User } from './types';
 import { INITIAL_CHECKLIST_ITEMS } from './constants';
@@ -91,6 +91,8 @@ const App: React.FC = () => {
   const [checklist, setChecklist] = useState<ChecklistItem[]>(INITIAL_CHECKLIST_ITEMS);
   const [signatures, setSignatures] = useState<SignatureData>({});
   const [isExporting, setIsExporting] = useState(false);
+  const [isExportingImage, setIsExportingImage] = useState(false);
+  const [isSendingToWhatsApp, setIsSendingToWhatsApp] = useState(false);
   const printRef = useRef<HTMLDivElement>(null);
   const urlParams = useMemo(() => new URLSearchParams(window.location.search), []);
   const remoteRoleParam = urlParams.get('role');
@@ -601,6 +603,99 @@ const App: React.FC = () => {
     }
   };
 
+  const captureChecklistCanvas = useCallback(async () => {
+    if (!printRef.current) return null;
+
+    return html2canvas(printRef.current, {
+      scale: 2,
+      useCORS: true,
+      logging: false,
+      backgroundColor: '#ffffff',
+      windowWidth: 1000,
+    });
+  }, []);
+
+  const downloadChecklistImage = useCallback(async () => {
+    if (!printRef.current) return;
+
+    setIsExportingImage(true);
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    try {
+      const canvas = await captureChecklistCanvas();
+      if (!canvas) return;
+
+      const imageData = canvas.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.href = imageData;
+      link.download = `Checklist_Setup_${formData.line || 'LINHA'}_${formData.date}.png`;
+      link.click();
+    } catch (error) {
+      console.error('Erro ao gerar imagem:', error);
+      alert('Erro ao gerar print do checklist.');
+    } finally {
+      setIsExportingImage(false);
+    }
+  }, [captureChecklistCanvas, formData.date, formData.line]);
+
+  const sendChecklistToWhatsApp = useCallback(async () => {
+    const checklistId = currentChecklistId || await saveToSupabase();
+    if (!checklistId) return;
+
+    setIsSendingToWhatsApp(true);
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    try {
+      const canvas = await captureChecklistCanvas();
+      if (!canvas) return;
+
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('Falha ao converter o print para arquivo.');
+
+      const fileName = `Checklist_Setup_${formData.line || 'LINHA'}_${formData.date}.png`;
+      const file = new File([blob], fileName, { type: 'image/png' });
+      const summary = `Checklist da linha ${formData.line || '---'} finalizado em ${formData.date}. Produto setup: ${formData.setupProduct || '---'}. Responsavel: ${formData.responsible || '---'}.`;
+
+      const canShareFiles =
+        typeof navigator !== 'undefined' &&
+        typeof navigator.share === 'function' &&
+        typeof navigator.canShare === 'function' &&
+        navigator.canShare({ files: [file] });
+
+      if (canShareFiles) {
+        await navigator.share({
+          title: `Checklist ${formData.line || 'Linha'}`,
+          text: summary,
+          files: [file],
+        });
+        return;
+      }
+
+      const imageUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = imageUrl;
+      link.download = fileName;
+      link.click();
+      URL.revokeObjectURL(imageUrl);
+
+      const whatsappText = `${summary} O print foi baixado automaticamente. Agora anexe a imagem no grupo para finalizar o envio.`;
+      window.open(`https://wa.me/?text=${encodeURIComponent(whatsappText)}`, '_blank', 'noopener,noreferrer');
+      alert('O navegador não permitiu anexar arquivo direto. O print foi baixado: agora anexe no grupo do WhatsApp.');
+    } catch (error) {
+      console.error('Erro ao enviar checklist para WhatsApp:', error);
+      alert('Nao foi possivel preparar o envio para o WhatsApp.');
+    } finally {
+      setIsSendingToWhatsApp(false);
+    }
+  }, [
+    captureChecklistCanvas,
+    currentChecklistId,
+    formData.date,
+    formData.line,
+    formData.responsible,
+    formData.setupProduct,
+  ]);
+
   const uniqueLines = useMemo(() => {
     const lines = historyItems.map(item => item.form_data.line).filter(Boolean);
     return Array.from(new Set(lines)).sort();
@@ -693,7 +788,7 @@ const App: React.FC = () => {
 
       {activeTab === 'editor' && (
         <main className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="grid grid-cols-1 gap-3 mb-4 no-print sm:grid-cols-3 md:flex md:justify-end">
+          <div className="grid grid-cols-1 gap-3 mb-4 no-print sm:grid-cols-2 md:flex md:justify-end">
             <button
               onClick={resetForm}
               className="flex min-h-[56px] items-center justify-center gap-2 px-4 py-3 bg-white border border-gray-200 text-gray-700 font-black rounded-xl transition-all text-xs shadow-sm hover:border-blue-400"
@@ -725,6 +820,36 @@ const App: React.FC = () => {
                 <Download size={18} />
               )}
               Baixar Documento PDF
+            </button>
+
+            <button
+              onClick={downloadChecklistImage}
+              disabled={isExportingImage}
+              className={`flex items-center gap-2 px-6 py-2.5 ${
+                isExportingImage ? 'bg-cyan-400' : 'bg-cyan-600 hover:bg-cyan-700'
+              } min-h-[56px] justify-center text-white font-black rounded-xl shadow-lg transition-all text-xs uppercase tracking-tighter`}
+            >
+              {isExportingImage ? (
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Image size={18} />
+              )}
+              Baixar Print PNG
+            </button>
+
+            <button
+              onClick={sendChecklistToWhatsApp}
+              disabled={isSendingToWhatsApp}
+              className={`flex items-center gap-2 px-6 py-2.5 ${
+                isSendingToWhatsApp ? 'bg-emerald-400' : 'bg-emerald-600 hover:bg-emerald-700'
+              } min-h-[56px] justify-center text-white font-black rounded-xl shadow-lg transition-all text-xs uppercase tracking-tighter`}
+            >
+              {isSendingToWhatsApp ? (
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Send size={18} />
+              )}
+              Enviar no WhatsApp
             </button>
           </div>
 
